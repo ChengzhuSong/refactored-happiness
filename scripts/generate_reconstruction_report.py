@@ -30,7 +30,17 @@ def load_assets():
     per_image_p = base / 'crello_train_elements_per_image.parquet'
     elems_p = base / 'crello_train_elements.parquet'
     emb_img_p = base / 'crello_element_image_embeddings.npy'
-    emb_text_p = base / 'crello_text_embeddings.npy'
+    # prefer per-split text embedding files produced by encode_text_with_clip.py
+    candidates = [base / 'crello_text_embeddings_test.npy',
+                  base / 'crello_text_embeddings_validation.npy',
+                  base / 'crello_text_embeddings_val.npy',
+                  base / 'crello_text_embeddings_train.npy',
+                  base / 'crello_text_embeddings.npy']
+    emb_text_p = None
+    for p in candidates:
+        if p.exists():
+            emb_text_p = p
+            break
 
     assert Xp.exists() and Maskp.exists(), 'poster inputs missing'
     X = np.load(Xp)
@@ -39,7 +49,7 @@ def load_assets():
     per_image = pd.read_parquet(per_image_p) if per_image_p.exists() else None
     elems = pd.read_parquet(elems_p) if elems_p.exists() else None
     emb_img = np.load(emb_img_p) if emb_img_p.exists() else None
-    emb_text = np.load(emb_text_p) if emb_text_p.exists() else None
+    emb_text = np.load(emb_text_p) if (emb_text_p is not None and emb_text_p.exists()) else None
 
     return X, MASK, per_image, elems, emb_img, emb_text
 

@@ -49,5 +49,18 @@ Developer notes
   - `compute_reconstruction_sensitivity.py` — ablation/sensitivity diagnostics
   - `eval_reconstruction_alignment.py` — evaluate cosine / P@k alignment
 
-Contact
-- If you need me to push a first commit for you (create README, .gitignore, initial commit), tell me and I can add those files here and/or run the git commands in your environment.
+FMI
+- What does the raw data like:
+  - `crello_test_elements_per_image.csv` — csv file with a row for an element, tokenized text, and image embeddings
+- Some other scripts and how they work:
+  - `encode_text_with_clip.py` — literal meanings, run 3 times for train. val and test set
+    - actually not that useful
+  - `prepare_poster_input.py` — prepare fixed-length input for transformer
+    - For each element in a poster it builds a feature vector:
+    - [image_embedding (512) | text_embedding (64) | geom (6)] → per-element feature dim (512+64+6 = 582 by default here).
+    - It groups elements by poster, sorts elements within a poster, pads/truncates to a fixed slot count (max_elems = 64), and produces:
+      - poster_inputs_X.npy (float32) shape: num_posters × max_elems × feat_dim
+      - poster_inputs_mask.npy (uint8) shape: num_posters × max_elems (1 = occupied / valid)
+      - poster_inputs_index.csv mapping poster id → number of elements (int)
+    - The script is deliberately lightweight and can fall back to a deterministic text embedding if heavy HF deps aren't present.
+  
