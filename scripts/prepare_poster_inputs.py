@@ -14,6 +14,7 @@ import os
 import sys
 import json
 import math
+import argparse
 import numpy as np
 import pandas as pd
 
@@ -87,11 +88,28 @@ def load_table(base_dir):
 
 
 def main():
+    parser = argparse.ArgumentParser(description='Prepare per-poster inputs from per-image elements table')
+    parser.add_argument('--input', type=str, default=None, help='Explicit input per-image parquet/csv path (overrides default search)')
+    parser.add_argument('--out-prefix', type=str, default=None, help='Output filename prefix within data/crello (e.g. poster_inputs_train)')
+    args = parser.parse_args()
+
     # base_dir should be the project's data/crello directory relative to this script
     base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'data', 'crello'))
     os.makedirs(base_dir, exist_ok=True)
 
-    df = load_table(base_dir)
+    if args.input:
+        if not os.path.exists(args.input):
+            raise FileNotFoundError('Provided input path not found: ' + args.input)
+        print('Loading per-image table from explicit input:', args.input)
+        # allow parquet or csv
+        if args.input.endswith('.parquet'):
+            df = pd.read_parquet(args.input)
+        else:
+            df = pd.read_csv(args.input)
+        out_prefix = args.out_prefix
+    else:
+        df = load_table(base_dir)
+        out_prefix = args.out_prefix
 
     # ensure poster id column
     poster_col = 'poster_id' if 'poster_id' in df.columns else ('poster_row_idx' if 'poster_row_idx' in df.columns else None)
@@ -130,14 +148,94 @@ def main():
     else:
         text_embs = np.zeros((len(df), 64), dtype=np.float32)
 
-    # geometry features: left, top, width, height, angle, opacity
-    geom_cols = ['left', 'top', 'width', 'height', 'angle', 'opacity']
-    geom = np.zeros((len(df), len(geom_cols)), dtype=np.float32)
-    for j, c in enumerate(geom_cols):
+    # geometry features split into position, size, angle, opacity
+    # position: left, top  (normalized by 1000)
+    # size: width, height  (normalized by 1000)
+    # angle: normalized by 360
+    # opacity: kept in [0,1]
+    position_cols = ['left', 'top']
+    size_cols = ['width', 'height']
+    angle_col = ['angle']
+    opacity_col = ['opacity']
+
+    pos = np.zeros((len(df), len(position_cols)), dtype=np.float32)
+    size = np.zeros((len(df), len(size_cols)), dtype=np.float32)
+    angle = np.zeros((len(df), len(angle_col)), dtype=np.float32)
+    opacity = np.zeros((len(df), len(opacity_col)), dtype=np.float32)
+
+    for j, c in enumerate(position_cols):
         if c in df.columns:
             col = pd.to_numeric(df[c], errors='coerce').fillna(0).astype(np.float32)
-            # naive normalization: divide by 1000 to keep numbers in reasonable range
-            geom[:, j] = (col.values / 1000.0)
+            pos[:, j] = (col.values / 1000.0)
+
+    for j, c in enumerate(size_cols):
+        if c in df.columns:
+            col = pd.to_numeric(df[c], errors='coerce').fillna(0).astype(np.float32)
+            size[:, j] = (col.values / 1000.0)
+
+    for j, c in enumerate(angle_col):
+        if c in df.columns:
+            col = pd.to_numeric(df[c], errors='coerce').fillna(0).astype(np.float32)
+            # normalize angle degrees to [0,1]
+            angle[:, j] = (col.values / 360.0)
+
+    for j, c in enumerate(opacity_col):
+        if c in df.columns:
+            col = pd.to_numeric(df[c], errors='coerce').fillna(0).astype(np.float32)
+            # clamp opacity to [0,1]
+            op = col.values
+            op = np.clip(op, 0.0, 1.0)
+            opacity[:, j] = op
+
+    # font: prefer numeric font index column. Map original font ids to a dense 0..K-1
+    # and save `font_idx` into the dataframe plus a `font_vocab.json` for reproducibility.
+    if 'font' in df.columns:
+        # attempt to interpret as integers (existing dataset stores font as index)
+        raw = pd.to_numeric(df['font'], errors='coerce').fillna(0).astype(int).tolist()
+        unique_vals = sorted(set(raw))
+        # create dense mapping old_id -> dense_idx
+        dense_map = {v: i for i, v in enumerate(unique_vals)}
+        font_idx_arr = np.array([dense_map.get(v, 0) for v in raw], dtype=np.int32)
+        df['font_idx'] = font_idx_arr
+        # write vocab mapping (list of original ids in dense order)
+        try:
+            vocab_path = os.path.join(base_dir, 'font_vocab.json')
+            with open(vocab_path, 'w', encoding='utf8') as f:
+                json.dump(unique_vals, f, ensure_ascii=False, indent=2)
+            print('Wrote font vocab to', vocab_path)
+        except Exception as e:
+            print('Warning: could not write font_vocab.json:', e)
+    else:
+        # no font column: create a font_idx column of zeros
+        df['font_idx'] = np.zeros((len(df),), dtype=np.int32)
+        unique_vals = [0]
+
+    # element type handling: prefer an integer 'type' column if present
+    # expected semantic codes (example): 0=vector shape, 1=text, 2=image, 3=pure color, 4=image_no_background
+    if 'type' in df.columns:
+        raw_t = pd.to_numeric(df['type'], errors='coerce').fillna(-1).astype(int).tolist()
+        unique_type_vals = sorted(set(raw_t))
+        # create dense mapping old_type -> dense_idx
+        dense_type_map = {v: i for i, v in enumerate(unique_type_vals)}
+        type_idx_arr = np.array([dense_type_map.get(v, 0) for v in raw_t], dtype=np.int32)
+        df['type_idx'] = type_idx_arr
+        # write type vocab mapping for reproducibility; include a small hint mapping when common codes present
+        try:
+            type_vocab_path = os.path.join(base_dir, 'type_vocab.json')
+            hint_map = {}
+            # add known hints if codes present
+            known = {0: 'vector_shape', 1: 'text', 2: 'image', 3: 'pure_color', 4: 'image_no_background'}
+            for code in unique_type_vals:
+                if code in known:
+                    hint_map[str(code)] = known[code]
+            with open(type_vocab_path, 'w', encoding='utf8') as f:
+                json.dump({'unique_vals': unique_type_vals, 'hints': hint_map}, f, ensure_ascii=False, indent=2)
+            print('Wrote type vocab to', type_vocab_path)
+        except Exception as e:
+            print('Warning: could not write type_vocab.json:', e)
+    else:
+        df['type_idx'] = np.zeros((len(df),), dtype=np.int32)
+        unique_type_vals = [0]
 
     # image embeddings per row
     img_dim = 512
@@ -167,19 +265,26 @@ def main():
         # redundant check; handled above
         pass
 
-    # build per-element feature vector: [img(512) | text(64) | geom(6)]
-    feat_dim = img_feats.shape[1] + text_embs.shape[1] + geom.shape[1]
+    # build per-element feature vector: [img(512) | text(text_dim) | pos(2) | size(2) | angle(1) | opacity(1)]
+    feat_dim = img_feats.shape[1] + text_embs.shape[1] + pos.shape[1] + size.shape[1] + angle.shape[1] + opacity.shape[1]
     print('Per-element feature dim:', feat_dim)
-    elem_feats = np.concatenate([img_feats, text_embs, geom], axis=1)
+    elem_feats = np.concatenate([img_feats, text_embs, pos, size, angle, opacity], axis=1)
 
-    # group by poster
+    # group by poster and build fixed-length sequences
     df['_orig_idx'] = np.arange(len(df))
     group_cols = [poster_col]
     groups = df.groupby(group_cols)
     poster_ids = []
-    seqs = []
     counts = []
     max_elems = 64
+
+    num_posters = len(groups)
+    X = np.zeros((num_posters, max_elems, feat_dim), dtype=np.float32)
+    MASK = np.zeros((num_posters, max_elems), dtype=np.uint8)
+    FONT_IDX = np.zeros((num_posters, max_elems), dtype=np.int32)
+    TYPE_IDX = np.zeros((num_posters, max_elems), dtype=np.int32)
+
+    i = 0
     for pid, g in groups:
         # sort by element_index then image_pos if present
         sort_cols = []
@@ -187,77 +292,80 @@ def main():
             sort_cols.append('element_index')
         if 'image_pos' in g.columns:
             sort_cols.append('image_pos')
-        if 'text_embedding' in df.columns:
-            print("Using precomputed 'text_embedding' column from per-image table")
-            text_list = df['text_embedding'].tolist()
-            try:
-                text_embs = np.vstack([np.array(x, dtype=np.float32) if (x is not None and str(x) != 'nan') else np.zeros((64,), dtype=np.float32) for x in text_list])
-            except Exception:
-                print('Warning: failed to parse text_embedding in per-image table; will try to merge from elements parquet')
-                df = df.drop(columns=['text_embedding'], errors='ignore')
+        if sort_cols:
+            g = g.sort_values(by=sort_cols)
 
-        # If per-image table lacks text_embedding, try to merge from crello_validation_elements.parquet
-        if 'text_embedding' not in df.columns:
-            elems_path = os.path.join(base_dir, 'crello_validation_elements.parquet')
-            if os.path.exists(elems_path):
-                print('Merging text_embedding from', elems_path)
-                elems = pd.read_parquet(elems_path)
-                # Determine join keys: prefer poster_row_idx + element_index, else poster_id + element_index
-                if 'poster_row_idx' in df.columns and 'element_index' in df.columns and 'poster_row_idx' in elems.columns:
-                    join_keys = ['poster_row_idx', 'element_index']
-                elif 'poster_id' in df.columns and 'element_index' in df.columns and 'poster_id' in elems.columns:
-                    join_keys = ['poster_id', 'element_index']
-                else:
-                    join_keys = None
+        idxs = g['_orig_idx'].values.astype(int)
+        seq = elem_feats[idxs]
+        n = seq.shape[0]
+        take = min(n, max_elems)
+        if take > 0:
+            X[i, :take] = seq[:take]
+            MASK[i, :take] = 1
+            # copy font indices for this poster's elements
+            font_seq = df['font_idx'].values[idxs]
+            FONT_IDX[i, :take] = font_seq[:take]
+            # copy type indices for this poster's elements
+            type_seq = df['type_idx'].values[idxs]
+            TYPE_IDX[i, :take] = type_seq[:take]
 
-                if join_keys is not None and 'text_embedding' in elems.columns:
-                    elems_small = elems[join_keys + ['text_embedding']].copy()
-                    # ensure element_index type matches
-                    if 'element_index' in join_keys:
-                        elems_small['element_index'] = pd.to_numeric(elems_small['element_index'], errors='coerce')
-                        df['element_index'] = pd.to_numeric(df['element_index'], errors='coerce')
-                    df = df.merge(elems_small, on=join_keys, how='left', suffixes=('', '_from_elems'))
-                    # if merge succeeded, use the merged column
-                    if 'text_embedding' in df.columns and df['text_embedding'].isnull().all():
-                        # if merged column is empty, try the fallback
-                        df = df.drop(columns=['text_embedding'], errors='ignore')
-                    else:
-                        print('Merged text_embedding into per-image table')
-                else:
-                    print('Could not find suitable join keys or text_embedding column in elements parquet; will fallback to deterministic embedding')
+        # store poster id and counts
+        poster_ids.append(pid)
+        counts.append(int(n))
+        i += 1
 
-        # After possible merge, if we now have text_embedding, convert it
-        if 'text_embedding' in df.columns:
-            print("Converting 'text_embedding' column to ndarray")
-            text_list = df['text_embedding'].tolist()
-            # infer dim from first non-null
-            dim = None
-            for x in text_list:
-                if x is not None and str(x) != 'nan':
-                    dim = len(x)
-                    break
-            if dim is None:
-                print('No valid text embeddings found after merge; using deterministic fallback')
-                text_embs = deterministic_text_embed(df.get('element_text', pd.Series([''] * len(df))).fillna('').tolist(), dim=64)
-            else:
-                text_embs = np.zeros((len(df), dim), dtype=np.float32)
-                for i, x in enumerate(text_list):
-                    try:
-                        if x is None or str(x) == 'nan':
-                            continue
-                        arr = np.array(x, dtype=np.float32)
-                        # L2-normalize if not already
-                        n = np.linalg.norm(arr)
-                        if n > 0:
-                            arr = arr / n
-                        text_embs[i, :arr.shape[0]] = arr
-                    except Exception:
-                        continue
-        elif 'element_text' in df.columns:
-            print('Computing lightweight deterministic text embeddings (dim=64)')
-            text_embs = deterministic_text_embed(df['element_text'].fillna('').tolist(), dim=64)
-        else:
-            text_embs = np.zeros((len(df), 64), dtype=np.float32)
+    # trim arrays in case some groups were filtered (shouldn't happen) but keep safe
+    if i != num_posters:
+        X = X[:i]
+        MASK = MASK[:i]
+        poster_ids = poster_ids[:i]
+        counts = counts[:i]
+
+    # save outputs
+    # choose output filenames; if out_prefix provided, use it to avoid overwrites for splits
+    if out_prefix:
+        out_X = os.path.join(base_dir, f'{out_prefix}_X.npy')
+        out_mask = os.path.join(base_dir, f'{out_prefix}_mask.npy')
+        out_font = os.path.join(base_dir, f'{out_prefix}_font_idx.npy')
+        out_type = os.path.join(base_dir, f'{out_prefix}_type_idx.npy')
+        out_index = os.path.join(base_dir, f'{out_prefix}_index.csv')
+        schema_p = os.path.join(base_dir, f'{out_prefix}_schema.json')
+    else:
+        out_X = os.path.join(base_dir, 'poster_inputs_X.npy')
+        out_mask = os.path.join(base_dir, 'poster_inputs_mask.npy')
+        out_font = os.path.join(base_dir, 'poster_inputs_font_idx.npy')
+        out_type = os.path.join(base_dir, 'poster_inputs_type_idx.npy')
+        out_index = os.path.join(base_dir, 'poster_inputs_index.csv')
+        schema_p = os.path.join(base_dir, 'poster_inputs_schema.json')
+    np.save(out_X, X)
+    np.save(out_mask, MASK)
+    np.save(out_font, FONT_IDX)
+    np.save(out_type, TYPE_IDX)
+    df_index = pd.DataFrame({'poster_id': poster_ids, 'num_elements': counts})
+    df_index.to_csv(out_index, index=False)
+    print('Wrote poster inputs:', out_X, out_mask, out_font, out_index)
+
+    # write schema to help downstream slicing
+    schema = {}
+    fields = [('image', img_dim), ('text', text_embs.shape[1]), ('pos', pos.shape[1]), ('size', size.shape[1]), ('angle', angle.shape[1]), ('opacity', opacity.shape[1])]
+    offsets = {}
+    cur = 0
+    for name, d in fields:
+        offsets[name] = [cur, cur + d]
+        cur += d
+    schema['fields'] = [{ 'name': n, 'dim': d, 'offset': offsets[n] } for n, d in fields]
+    schema['feat_dim'] = feat_dim
+    schema['max_elems'] = max_elems
+    # font metadata: path and number of unique font ids
+    schema['font'] = { 'path': os.path.basename(out_font), 'num_fonts': len(unique_vals) }
+    # type metadata: path and number of unique type ids
+    schema['type'] = { 'path': os.path.basename(out_type), 'num_types': len(unique_type_vals) }
+    try:
+        with open(schema_p, 'w', encoding='utf8') as f:
+            json.dump(schema, f, indent=2)
+        print('Wrote schema to', schema_p)
+    except Exception as e:
+        print('Warning: failed to write schema:', e)
 
 if __name__ == '__main__':
     main()
