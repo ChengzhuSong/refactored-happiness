@@ -159,6 +159,8 @@ for epoch in range(epochs):
         # Use FONTb to decide presence instead of checking text embedding norm (which may
         # be non-zero for non-text elements).
         has_text = (FONTb != 0)
+        # also compute font presence explicitly so we can gate font masking early
+        has_font = (FONTb != 0)
 
         # build masks
         valid_mask = (MASKb == 1)
@@ -172,9 +174,11 @@ for epoch in range(epochs):
             rand_idx = torch.randint(0, len(tokenizer_order), (B, S), device=device)
             for tt in range(len(tokenizer_order)):
                 m = (rand_idx == tt) & target_mask
-                # if this is the text attribute, only mask slots that actually have text
+                # gate masking for attributes that may be absent: text and font
                 if tokenizer_order[tt] == 'text':
                     m = m & has_text
+                elif tokenizer_order[tt] == 'font':
+                    m = m & has_font
                 slot_attr_mask[:, :, tt] = m
                 masked_attr_id[m] = tt + 1
         elif mask_attrs_mode == 'all':
@@ -182,8 +186,11 @@ for epoch in range(epochs):
             for tt in range(len(tokenizer_order)):
                 if tokenizer_order[tt] == 'text':
                     slot_attr_mask[:, :, tt] = target_mask & has_text
+                elif tokenizer_order[tt] == 'font':
+                    slot_attr_mask[:, :, tt] = target_mask & has_font
                 else:
                     slot_attr_mask[:, :, tt] = target_mask
+            # mark masked_attr_id for text (and font will only be set where has_font True)
             masked_attr_id[target_mask & has_text] = 1  # non-zero indicates masked (text only when has_text)
         else:
             # list mode: cycle through provided attrs for masked slots (or apply all of them)
@@ -191,6 +198,8 @@ for epoch in range(epochs):
                 tt = tokenizer_order.index(a)
                 if tokenizer_order[tt] == 'text':
                     m = target_mask & has_text
+                elif tokenizer_order[tt] == 'font':
+                    m = target_mask & has_font
                 else:
                     m = target_mask
                 slot_attr_mask[:, :, tt] = m
@@ -303,8 +312,9 @@ for epoch in range(epochs):
     val_loss = None
     val_steps = 0
     val_epoch_loss = 0.0
-    val_attr_losses = {name: 0.0 for name in attr_names}
-    val_attr_counts = {name: 0 for name in attr_names}
+    # include 'font' in validation loss tracking so we can accumulate font CE loss
+    val_attr_losses = {name: 0.0 for name in (attr_names + ['font'])}
+    val_attr_counts = {name: 0 for name in (attr_names + ['font'])}
     # try to locate val files
     val_prefix = f"poster_input_{args.val_split}"
     val_X_path = os.path.join(base, f"{val_prefix}_X.npy")
@@ -340,6 +350,8 @@ for epoch in range(epochs):
             # determine which slots actually contain text in validation by checking font index
             # font==0 denotes non-text element
             has_text_v = (FONTv != 0)
+            # also compute font presence for validation so we can gate font masking early
+            has_font_v = (FONTv != 0)
 
             # construct slot_attr_mask for val using mask_attrs_mode
             slot_attr_mask_v = torch.zeros((Bv, S, len(tokenizer_order)), dtype=torch.bool, device=device)
@@ -348,14 +360,19 @@ for epoch in range(epochs):
                 rand_idx = torch.randint(0, len(tokenizer_order), (Bv, S), device=device)
                 for tt in range(len(tokenizer_order)):
                     m = (rand_idx == tt) & target_mask_v
+                    # gate text/font presence in validation masking as well
                     if tokenizer_order[tt] == 'text':
                         m = m & has_text_v
+                    elif tokenizer_order[tt] == 'font':
+                        m = m & has_font_v
                     slot_attr_mask_v[:, :, tt] = m
                     masked_attr_id_v[m] = tt + 1
             elif mask_attrs_mode == 'all':
                 for tt in range(len(tokenizer_order)):
                     if tokenizer_order[tt] == 'text':
                         slot_attr_mask_v[:, :, tt] = target_mask_v & has_text_v
+                    elif tokenizer_order[tt] == 'font':
+                        slot_attr_mask_v[:, :, tt] = target_mask_v & has_font_v
                     else:
                         slot_attr_mask_v[:, :, tt] = target_mask_v
                 masked_attr_id_v[target_mask_v & has_text_v] = 1
@@ -364,6 +381,8 @@ for epoch in range(epochs):
                     tt = tokenizer_order.index(a)
                     if tokenizer_order[tt] == 'text':
                         m = target_mask_v & has_text_v
+                    elif tokenizer_order[tt] == 'font':
+                        m = target_mask_v & has_font_v
                     else:
                         m = target_mask_v
                     slot_attr_mask_v[:, :, tt] = m
