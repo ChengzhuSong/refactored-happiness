@@ -64,3 +64,6 @@ FMI
       - poster_inputs_index.csv mapping poster id → number of elements (int)
     - The script is deliberately lightweight and can fall back to a deterministic text embedding if heavy HF deps aren't present.
   
+
+<img src="image.png" alt="Model architecture overview1" width="800" />
+<img src="image1.png" alt="Model architecture overview2" width="800" />
