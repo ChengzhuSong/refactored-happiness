@@ -66,7 +66,8 @@ def build_models(schema, device, d_attr=128, D_elem=256, num_fonts_override: int
 
 	# decoders for continuous attributes
 	attr_names = [f['name'] for f in schema['fields']]
-	decoders = {name: nn.Linear(D_elem, fields[name]['dim']).to(device) for name in attr_names}
+	from models.heads import make_decoder
+	decoders = {name: make_decoder(D_elem, fields[name]['dim']).to(device) for name in attr_names}
 	# font classifier
 	font_classifier = nn.Linear(D_elem, num_fonts).to(device)
 
