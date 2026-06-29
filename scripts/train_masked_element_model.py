@@ -33,27 +33,19 @@ class PosterDataset(Dataset):
     and mask is an integer mask array of shape (L,) with 1 for valid tokens.
     """
 
-    def __init__(self, x_path: str, mask_path: str, font_path: Optional[str] = None, subset: Optional[int] = None):
+    def __init__(self, x_path: str, mask_path: str, subset: Optional[int] = None):
         self.X = np.load(x_path, mmap_mode='r')
         self.mask = np.load(mask_path, mmap_mode='r')
-        self.font_idx = None
-        if font_path is not None and os.path.exists(font_path):
-            self.font_idx = np.load(font_path, mmap_mode='r')
         if subset is not None:
             self.X = self.X[:subset]
             self.mask = self.mask[:subset]
-            if self.font_idx is not None:
-                self.font_idx = self.font_idx[:subset]
 
     def __len__(self) -> int:
         return int(self.X.shape[0])
 
-    def __getitem__(self, idx: int):
+    def __getitem__(self, idx: int) -> Tuple[np.ndarray, np.ndarray]:
         x = self.X[idx].astype(np.float32)
         m = self.mask[idx].astype(np.uint8)
-        if self.font_idx is not None:
-            f = self.font_idx[idx].astype(np.int32)
-            return x, m, f
         return x, m
 
 
@@ -74,8 +66,6 @@ class MaskedElementTransformer(nn.Module):
         n_heads: int = 8,
         max_len: int = 64,
         dropout: float = 0.1,
-        font_vocab_size: Optional[int] = None,
-        font_emb_dim: int = 16,
     ) -> None:
         super().__init__()
         self.input_dim = input_dim
@@ -88,18 +78,10 @@ class MaskedElementTransformer(nn.Module):
         )
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=n_layers)
         self.output_proj = nn.Linear(model_dim, input_dim)
-        # optional font embedding
-        self.font_emb = None
-        self.font_proj = None
-        if font_vocab_size is not None and font_vocab_size > 0:
-            self.font_emb = nn.Embedding(font_vocab_size, font_emb_dim)
-            self.font_proj = nn.Linear(font_emb_dim, model_dim)
 
     def forward(self, x: torch.Tensor, valid_mask: Optional[torch.Tensor] = None, mask_positions: Optional[torch.Tensor] = None) -> torch.Tensor:
         b, l, d = x.shape
         h = self.input_proj(x)  # (B,L,M)
-        # if font indices provided inside x separately, they should be added externally; we support
-        # adding a projected font embedding via passing it concatenated after collate (see train loop)
         if mask_positions is not None:
             # mask_positions: bool tensor (B,L) where True means we should replace with mask token
             mask_tok = self.mask_token.unsqueeze(0).unsqueeze(0).expand(b, l, -1)
@@ -122,12 +104,8 @@ def collate_fn(batch):
 
     Converts numpy arrays to torch tensors and ensures float32 for inputs and uint8 for masks.
     """
-    # batch items may be (x,m) or (x,m,f)
     xs = np.stack([b[0] for b in batch], axis=0)
     ms = np.stack([b[1] for b in batch], axis=0)
-    if len(batch[0]) == 3:
-        fs = np.stack([b[2] for b in batch], axis=0).astype(np.int64)
-        return torch.from_numpy(xs.astype(np.float32)), torch.from_numpy(ms.astype(np.uint8)), torch.from_numpy(fs)
     return torch.from_numpy(xs.astype(np.float32)), torch.from_numpy(ms.astype(np.uint8))
 
 

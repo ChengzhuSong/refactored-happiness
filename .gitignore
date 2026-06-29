@@ -11,14 +11,18 @@ env/
 .ipynb_checkpoints/
 
 # Data / outputs / models
-data/
-outputs/
-models/
+evaluations/
+rawdata/
+checkpoints/
 wandb/
 *.ckpt
 *.pt
 *.pth
 *.h5
+*.log
+data/
+outputs/
+
 
 # OS
 .DS_Store

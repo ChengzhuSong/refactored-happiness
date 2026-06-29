@@ -27,6 +27,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from models.two_stage_transformer import AttributeStage, ElementStage
+from models.heads import make_decoder
 
 
 def build_candidate_pool(base_dir='data/crello', slots=64, max_candidates=None):
@@ -110,7 +111,7 @@ def nn_decode(args):
     num_roles = schema.get('type', {}).get('num_types', int(TYPE_all.max() + 1))
     attr_stage = AttributeStage(img_dim=schema['fields'][0]['dim'], txt_dim=fields['text']['dim'], d_attr=d_attr, D_elem=D_elem, num_fonts=num_fonts)
     elem_stage = ElementStage(D_elem=D_elem, num_roles=num_roles, max_slots=S, num_attributes=len(schema['fields']) + 1)
-    decoders = {name: nn.Linear(D_elem, fields[name]['dim']) for name in [f['name'] for f in schema['fields']]}
+    decoders = {name: make_decoder(D_elem, fields[name]['dim']) for name in [f['name'] for f in schema['fields']]}
 
     # load state
     attr_stage.load_state_dict(ckpt['attr_stage'])
